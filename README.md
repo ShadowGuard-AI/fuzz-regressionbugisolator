@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # fuzz-RegressionBugIsolator
 Identifies the minimal input change required to trigger a regression bug, using a delta debugging approach. Takes two inputs: one that triggers the bug and one that doesn't. - Focused on Simplifies the process of generating and executing fuzzing payloads against web applications. Focuses on parameter manipulation and injection techniques to identify vulnerabilities such as SQL injection or XSS. Allows for quick iteration and vulnerability confirmation.
 
