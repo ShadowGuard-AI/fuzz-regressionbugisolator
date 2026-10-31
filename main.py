@@ -2,7 +2,6 @@ import argparse
 import logging
 import sys
 import requests
-from parameterized import parameterized
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,7 +41,11 @@ def test_input(url, parameter, input_value, method, success_status_codes):
         success_status_codes (list): A list of integer status codes considered success.
 
     Returns:
-        bool: True if the input triggers the bug (i.e., returns a non-success status code), False otherwise.
+        bool or None: True if the input triggers the bug (the response status is
+        outside the success status codes), False if the response status is one
+        of the success status codes, and None if the target could not be
+        reached at all. None is a distinct third result and is never reported
+        as False.
     """
     try:
         params = {parameter: input_value}
@@ -52,19 +55,17 @@ def test_input(url, parameter, input_value, method, success_status_codes):
         else:  # POST
             response = requests.post(url, data=params)
 
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-
-        if response.status_code in success_status_codes:
-            return False  # Input did not trigger the bug
-        else:
-            return True  # Input triggered the bug
-
     except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed: {e}")
-        return False # Treat as not triggering, to continue fuzzing.  Important for stability.
+        logging.error(f"Request failed, target could not be reached: {e}")
+        return None
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return False
+        logging.error(f"An unexpected error occurred, target could not be reached: {e}")
+        return None
+
+    if response.status_code in success_status_codes:
+        return False  # Input did not trigger the bug
+    else:
+        return True  # Input triggered the bug
 
 
 def delta_debugging(url, parameter, bug_triggering_input, non_triggering_input, method, success_status_codes):
@@ -80,38 +81,98 @@ def delta_debugging(url, parameter, bug_triggering_input, non_triggering_input, 
         success_status_codes (list): A list of integer status codes considered as success.
 
     Returns:
-        str: The minimal input change that triggers the bug, or None if no such change is found.
+        tuple: (result, status) where result is a string describing the
+        minimal triggering input and the critical character it isolates, or
+        None when nothing was isolated. status is 0 when a change was
+        isolated, 1 when none was found (including failed preconditions where
+        the target answered), and 2 when the target could not be reached.
     """
 
     logging.info("Starting delta debugging...")
-    
+
     # Input validation and sanitization:  For demonstration, basic length check
     if len(bug_triggering_input) > 1000 or len(non_triggering_input) > 1000:
         logging.error("Input strings are too long.  Consider shortening.")
-        return None
+        return None, 1
 
-    # Simple delta debugging: character-by-character comparison
-    for i in range(min(len(bug_triggering_input), len(non_triggering_input))):
-        if bug_triggering_input[i] != non_triggering_input[i]:
-            # Test if changing the bug_triggering_input at this position makes it not trigger the bug
-            temp_input = bug_triggering_input[:i] + non_triggering_input[i] + bug_triggering_input[i+1:]
-            if not test_input(url, parameter, temp_input, method, success_status_codes):
-                # This change makes the bug disappear, so the bug is related to the original character in bug_triggering_input
-                logging.info(f"Identified a critical character at index {i}: {bug_triggering_input[i]}")
-                return f"Change at index {i}: '{bug_triggering_input[i]}' -> '{non_triggering_input[i]}'"
+    def triggers(value):
+        return test_input(url, parameter, value, method, success_status_codes)
 
+    # Verify the preconditions before claiming anything.
+    triggering_result = triggers(bug_triggering_input)
+    if triggering_result is None:
+        logging.error("Isolation cannot proceed: the target could not be reached.")
+        return None, 2
+    if triggering_result is not True:
+        logging.error("Isolation cannot proceed: the bug-triggering input did not trigger the bug.")
+        return None, 1
 
-    # If inputs have different lengths and the common part is not triggering the bug, then
-    # the extra part of the bug-triggering input could be the reason.
-    if len(bug_triggering_input) > len(non_triggering_input):
-        extra_part = bug_triggering_input[len(non_triggering_input):]
-        logging.info(f"Extra part in bug_triggering_input: {extra_part}")
-        if test_input(url, parameter, non_triggering_input, method, success_status_codes):
-            logging.info("The extra part of bug_triggering_input is causing the bug.")
-            return f"Extra part causing bug: {extra_part}"
-    
-    logging.info("Could not isolate the minimal difference.")
-    return None
+    non_triggering_result = triggers(non_triggering_input)
+    if non_triggering_result is None:
+        logging.error("Isolation cannot proceed: the target could not be reached.")
+        return None, 2
+    if non_triggering_result is not False:
+        logging.error("Isolation cannot proceed: the non-triggering input also triggers the bug.")
+        return None, 1
+
+    # Real delta debugging (ddmin): shrink the triggering input while it
+    # still tests as triggering, trying chunk removals and single chunks at
+    # increasing granularity.
+    minimal = bug_triggering_input
+    n = 2
+    while len(minimal) >= 2:
+        chunk_size = (len(minimal) + n - 1) // n
+        reduced = False
+
+        # Try removing each chunk.
+        for start in range(0, len(minimal), chunk_size):
+            candidate = minimal[:start] + minimal[start + chunk_size:]
+            if candidate and triggers(candidate) is True:
+                minimal = candidate
+                n = max(n - 1, 2)
+                reduced = True
+                break
+        if reduced:
+            continue
+
+        # Try each chunk on its own.
+        for start in range(0, len(minimal), chunk_size):
+            candidate = minimal[start:start + chunk_size]
+            if candidate != minimal and triggers(candidate) is True:
+                minimal = candidate
+                n = 2
+                reduced = True
+                break
+        if reduced:
+            continue
+
+        if n >= len(minimal):
+            break
+        n = min(n * 2, len(minimal))
+
+    if triggers(minimal) is not True:
+        logging.info("Could not isolate the minimal difference.")
+        return None, 1
+
+    # Name the critical character: the first character of the minimal input
+    # whose removal makes it stop triggering.
+    critical = None
+    for i in range(len(minimal)):
+        candidate = minimal[:i] + minimal[i + 1:]
+        if candidate and triggers(candidate) is not True:
+            critical = minimal[i]
+            break
+        if not candidate:
+            critical = minimal[i]
+            break
+    if critical is None and len(minimal) == 1:
+        critical = minimal[0]
+
+    logging.info(f"Minimal triggering input: {minimal!r}")
+    if critical is not None:
+        logging.info(f"Identified a critical character: {critical!r}")
+        return f"Minimal triggering input: '{minimal}', critical character: '{critical}'", 0
+    return f"Minimal triggering input: '{minimal}'", 0
 
 
 def load_payloads(payloads_file):
@@ -123,10 +184,10 @@ def load_payloads(payloads_file):
             return [line.strip() for line in f]
     except FileNotFoundError:
         logging.error(f"Payloads file not found: {payloads_file}")
-        return []
+        return None
     except Exception as e:
         logging.error(f"Error reading payloads file: {e}")
-        return []
+        return None
 
 
 def main():
@@ -150,19 +211,31 @@ def main():
         logging.error(f"An unexpected error occurred during argument parsing: {e}")
         sys.exit(1)
 
-    minimal_change = delta_debugging(args.url, args.parameter, args.bug_triggering_input, args.non_triggering_input, args.method, success_status_codes)
+    payloads = None
+    if args.payloads_file:
+        payloads = load_payloads(args.payloads_file)
+        if payloads is None:
+            print("Could not read the payloads file.")
+            sys.exit(2)
+
+    minimal_change, status = delta_debugging(args.url, args.parameter, args.bug_triggering_input, args.non_triggering_input, args.method, success_status_codes)
 
     if minimal_change:
         print(f"Minimal input change to trigger the bug: {minimal_change}")
     else:
         print("Could not isolate the minimal input change.")
-        
-    if args.payloads_file:
-        payloads = load_payloads(args.payloads_file)
+
+    if payloads is not None:
         print("\nTesting payloads from file:")
         for payload in payloads:
             is_bug_trigger = test_input(args.url, args.parameter, payload, args.method, success_status_codes)
-            print(f"Payload: {payload} - Triggers Bug: {is_bug_trigger}")
+            if is_bug_trigger is None:
+                print(f"Payload: {payload} - Triggers Bug: could not be reached")
+                status = 2
+            else:
+                print(f"Payload: {payload} - Triggers Bug: {is_bug_trigger}")
+
+    sys.exit(status)
 
 if __name__ == "__main__":
     main()

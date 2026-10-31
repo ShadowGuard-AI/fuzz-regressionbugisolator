@@ -1,7 +1,7 @@
 ![Banner](banner.png)
 
 # fuzz-RegressionBugIsolator
-Identifies the minimal input change required to trigger a regression bug, using a delta debugging approach. Takes two inputs: one that triggers the bug and one that doesn't. - Focused on Simplifies the process of generating and executing fuzzing payloads against web applications. Focuses on parameter manipulation and injection techniques to identify vulnerabilities such as SQL injection or XSS. Allows for quick iteration and vulnerability confirmation.
+Identifies the minimal input change required to trigger a regression bug, using a delta debugging approach. Takes two inputs: one that triggers the bug and one that doesn't. - Focused on Simplifies the process of generating and executing fuzzing payloads against web applications. Focuses on parameter manipulation and injection techniques to identify vulnerabilities such as SQL injection or XSS. Allows for quick iteration and vulnerability confirmation. An input counts as triggering when the response status is outside the success status codes; a target that cannot be reached is reported as a distinct result, never as not triggering. Exit codes: 0 when a change is isolated, 1 when no change is found (including when the stated triggering or non-triggering input does not test as stated and the target answered), and 2 when the target could not be reached or the payloads file could not be read.
 
 ## Install
 `git clone https://github.com/ShadowStrikeHQ/fuzz-regressionbugisolator`
