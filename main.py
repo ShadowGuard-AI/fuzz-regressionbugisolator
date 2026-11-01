@@ -51,6 +51,10 @@ def test_input(url, parameter, input_value, method, success_status_codes):
         params = {parameter: input_value}
 
         if method == "GET":
+            # No timeout is set on either request call. A target that accepts the
+            # connection and never answers hangs this tool indefinitely, and the
+            # delta debugging loop below issues many requests, so one hang stops
+            # the whole isolation with no result. Noted as the sharpest edge here.
             response = requests.get(url, params=params)
         else:  # POST
             response = requests.post(url, data=params)
@@ -62,6 +66,10 @@ def test_input(url, parameter, input_value, method, success_status_codes):
         logging.error(f"An unexpected error occurred, target could not be reached: {e}")
         return None
 
+    # The oracle is status only. A response that differs in body but keeps
+    # a success status reads as not triggering, and an error page served
+    # with a 200 reads as fine. Everything this tool concludes is bounded
+    # by that one signal.
     if response.status_code in success_status_codes:
         return False  # Input did not trigger the bug
     else:
@@ -118,6 +126,12 @@ def delta_debugging(url, parameter, bug_triggering_input, non_triggering_input, 
     # Real delta debugging (ddmin): shrink the triggering input while it
     # still tests as triggering, trying chunk removals and single chunks at
     # increasing granularity.
+    # What follows is ddmin on the triggering input alone. The
+    # non-triggering input served as a precondition and is never consulted
+    # again, so the result is the smallest string I found that still
+    # triggers, not the smallest difference between the two inputs the
+    # command line names suggest. Those are different answers, and the
+    # printed text reports the one actually computed.
     minimal = bug_triggering_input
     n = 2
     while len(minimal) >= 2:
@@ -159,6 +173,11 @@ def delta_debugging(url, parameter, bug_triggering_input, non_triggering_input, 
     critical = None
     for i in range(len(minimal)):
         candidate = minimal[:i] + minimal[i + 1:]
+        # Removal is judged with is not True, which folds the unreachable
+        # result, None, into stops triggering. If the target dies during this
+        # loop, the character being probed at that moment is named critical
+        # on no evidence. The preconditions were checked while the target was
+        # alive; nothing rechecks it here.
         if candidate and triggers(candidate) is not True:
             critical = minimal[i]
             break
@@ -227,6 +246,9 @@ def main():
 
     if payloads is not None:
         print("\nTesting payloads from file:")
+        # Payloads are tested after isolation, against the same oracle. One
+        # unreachable payload rewrites the run's exit status to 2, even when
+        # the isolation itself succeeded and printed a result above.
         for payload in payloads:
             is_bug_trigger = test_input(args.url, args.parameter, payload, args.method, success_status_codes)
             if is_bug_trigger is None:
